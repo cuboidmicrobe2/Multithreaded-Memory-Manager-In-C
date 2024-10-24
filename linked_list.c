@@ -1,4 +1,7 @@
+#define _GNU_SOURCE
 #include "linked_list.h"
+
+pthread_rwlock_t rwLock;
 
 /**
  * Initializes the linked list.
@@ -8,6 +11,7 @@
 void list_init(Node **head, size_t size) {
     mem_init(size);
     *head = NULL;
+    pthread_rwlock_init(&rwLock, NULL);
 }
 
 /**
@@ -17,9 +21,11 @@ void list_init(Node **head, size_t size) {
  * @param data The data to be inserted.
  */
 void list_insert(Node **head, uint16_t data) {
+    pthread_rwlock_wrlock(&rwLock);
     Node *newNode = (Node *)mem_alloc(sizeof(Node));
     if (newNode == NULL) {
         printf_red("Memory allocation failed in insert()\n");
+        pthread_rwlock_unlock(&rwLock);
         return;
     }
 
@@ -36,6 +42,7 @@ void list_insert(Node **head, uint16_t data) {
         newNode->data = data;
         newNode->next = NULL;
     }
+    pthread_rwlock_unlock(&rwLock);
 }
 
 /**
@@ -55,9 +62,11 @@ void list_insert_after(Node *prevNode, uint16_t data) {
         printf_red("Memory allocation failed\n");
         return;
     }
+    pthread_rwlock_wrlock(&rwLock);
     newNode->data = data;
     newNode->next = prevNode->next;
     prevNode->next = newNode;
+    pthread_rwlock_unlock(&rwLock);
 }
 
 /**
@@ -80,9 +89,11 @@ void list_insert_before(Node **head, Node *nextNode, uint16_t data) {
     }
     newNode->data = data;
     newNode->next = nextNode;
+    pthread_rwlock_wrlock(&rwLock);
 
     if (*head == nextNode) {
         *head = newNode;
+        pthread_rwlock_unlock(&rwLock);
         return;
     }
 
@@ -94,6 +105,8 @@ void list_insert_before(Node **head, Node *nextNode, uint16_t data) {
     if (current != NULL) {  // crazy if
         current->next = newNode;
     }
+
+    pthread_rwlock_unlock(&rwLock);
 }
 
 /**
@@ -103,12 +116,14 @@ void list_insert_before(Node **head, Node *nextNode, uint16_t data) {
  * @param data The data of the node to be deleted.
  */
 void list_delete(Node **head, uint16_t data) {
+    pthread_rwlock_wrlock(&rwLock);
     Node *temp = *head;
     Node *prev = NULL;
 
     if (temp != NULL && temp->data == data) {
         *head = temp->next;
         mem_free(temp);
+        pthread_rwlock_unlock(&rwLock);
         return;
     }
 
@@ -117,10 +132,13 @@ void list_delete(Node **head, uint16_t data) {
         temp = temp->next;
     }
 
-    if (temp == NULL) return;
-
+    if (temp == NULL) {
+        pthread_rwlock_unlock(&rwLock);
+        return;
+    }
     prev->next = temp->next;
     mem_free(temp);
+    pthread_rwlock_unlock(&rwLock);
 }
 
 /**
@@ -131,13 +149,16 @@ void list_delete(Node **head, uint16_t data) {
  * @return A pointer to the node with the given data, or NULL if not found.
  */
 Node *list_search(Node **head, uint16_t data) {
+    pthread_rwlock_rdlock(&rwLock);
     Node *current = *head;
     while (current != NULL) {
         if (current->data == data) {
+            pthread_rwlock_unlock(&rwLock);
             return current;
         }
         current = current->next;
     }
+    pthread_rwlock_unlock(&rwLock);
     return NULL;
 }
 
@@ -147,21 +168,7 @@ Node *list_search(Node **head, uint16_t data) {
  * @param head A pointer to the head of the list.
  */
 void list_display(Node **head) {
-    Node *current = *head;
-    if (current == NULL) {
-        printf("NULL");
-        return;
-    }
-
-    printf("[");
-    while (current != NULL) {
-        printf("%d", current->data);
-        current = current->next;
-        if (current) {
-            printf(", ");
-        }
-    }
-    printf("]");
+    list_display_range(head, NULL, NULL);
 }
 
 /**
@@ -172,9 +179,11 @@ void list_display(Node **head) {
  * @param endNode A pointer to the ending node of the range.
  */
 void list_display_range(Node **head, Node *startNode, Node *endNode) {
+    pthread_rwlock_rdlock(&rwLock);
     Node *current = startNode;
     if (*head == NULL) {
         printf("[]");
+        pthread_rwlock_unlock(&rwLock);
         return;
     }
 
@@ -194,6 +203,7 @@ void list_display_range(Node **head, Node *startNode, Node *endNode) {
         }
     }
     printf("]");
+    pthread_rwlock_unlock(&rwLock);
 }
 
 /**
@@ -203,12 +213,14 @@ void list_display_range(Node **head, Node *startNode, Node *endNode) {
  * @return The number of nodes in the list.
  */
 int list_count_nodes(Node **head) {
+    pthread_rwlock_rdlock(&rwLock);
     int count = 0;
     Node *current = *head;
     while (current != NULL) {
         count++;
         current = current->next;
     }
+    pthread_rwlock_unlock(&rwLock);
     return count;
 }
 
@@ -227,4 +239,5 @@ void list_cleanup(Node **head) {
     }
     *head = NULL;
     mem_deinit();
+    pthread_rwlock_destroy(&rwLock);
 }

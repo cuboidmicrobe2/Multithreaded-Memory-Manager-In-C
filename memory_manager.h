@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 void mem_init(size_t size);
 void* mem_alloc(size_t size);

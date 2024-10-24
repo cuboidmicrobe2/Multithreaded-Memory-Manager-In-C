@@ -1,31 +1,15 @@
 #include "memory_manager.h"
 
+typedef struct Node {
+    void* start;
+    void* end;
+    struct Node* next;
+} Node;
+
 void* memoryPool = NULL;
 size_t memorySize = 0;
-unsigned char* start = NULL;
-unsigned char* end = NULL;
-
-/// @brief sets a bit to 1
-/// @param array
-/// @param index
-void set_bit(unsigned char* array, size_t index) {
-    array[index / 8] |= (1 << (index % 8));
-}
-
-/// @brief sets a bit to 0
-/// @param array
-/// @param index
-void clear_bit(unsigned char* array, size_t index) {
-    array[index / 8] &= ~(1 << (index % 8));
-}
-
-/// @brief returns bit
-/// @param array
-/// @param index
-/// @return
-bool get_bit(const unsigned char* array, size_t index) {
-    return array[index / 8] & (1 << (index % 8));
-}
+Node* head = NULL;
+pthread_mutex_t mLock;
 
 /**
  * Initializes the memory manager with a given size.
@@ -35,8 +19,8 @@ bool get_bit(const unsigned char* array, size_t index) {
 void mem_init(size_t size) {
     memoryPool = malloc(size);
     memorySize = size;
-    start = calloc((size + 7) / 8, sizeof(char));
-    end = calloc((size + 7) / 8, sizeof(char));
+    head = NULL;
+    pthread_mutex_init(&mLock, NULL);
 }
 
 /**
@@ -46,29 +30,91 @@ void mem_init(size_t size) {
  * @return A pointer to the allocated memory block, or NULL if the allocation
  * fails.
  */
-void* mem_alloc(size_t size) {
+void* mem_alloc_no_lock(size_t size) {
     if (size > memorySize) return NULL;
-    if (size == 0) return memoryPool; // :(
-    size_t nrOfEmptySegments = 0;
-    bool isEmpty = true;
+    if (size == 0) return memoryPool;  // :(
 
-    for (size_t i = 0; i < memorySize; i++) {
-        if (get_bit(start, i)) {
-            isEmpty = false;
-        }
+    Node* nodeToAdd = malloc(sizeof(Node));
+    if (!nodeToAdd) return NULL;
 
-        nrOfEmptySegments = (isEmpty) ? nrOfEmptySegments + 1 : 0;
-        if (nrOfEmptySegments >= size) {
-            set_bit(start, i - size + 1);
-            set_bit(end, i);
-            return memoryPool + i - size + 1;
-        }
-
-        if (get_bit(end, i) == true) {
-            isEmpty = true;
-        }
+    if (head == NULL || head->start - memoryPool >= size) {
+        nodeToAdd->start = memoryPool;
+        nodeToAdd->end = memoryPool + size;
+        nodeToAdd->next = head;
+        head = nodeToAdd;
+        return nodeToAdd->start;
     }
 
+    Node* walker = head;
+    while (walker->next != NULL) {
+        if (walker->next->start - walker->end >= size) {
+            nodeToAdd->start = walker->end;
+            nodeToAdd->end = walker->end + size;
+            nodeToAdd->next = walker->next;
+            walker->next = nodeToAdd;
+            return nodeToAdd->start;
+        }
+        walker = walker->next;
+    }
+
+    if (memoryPool + memorySize - walker->end >= size) {
+        nodeToAdd->start = walker->end;
+        nodeToAdd->end = walker->end + size;
+        nodeToAdd->next = NULL;
+        walker->next = nodeToAdd;
+        return nodeToAdd->start;
+    }
+
+    free(nodeToAdd);
+    return NULL;
+}
+
+void* mem_alloc(size_t size) {
+    if (size > memorySize) return NULL;
+    if (size == 0) return memoryPool;  // :(
+
+    Node* nodeToAdd = malloc(sizeof(Node));
+    if (!nodeToAdd) return NULL;
+
+    pthread_mutex_lock(&mLock);
+
+    if (head == NULL || head->start - memoryPool >= size) {
+        nodeToAdd->start = memoryPool;
+        nodeToAdd->end = memoryPool + size;
+        nodeToAdd->next = head;
+        head = nodeToAdd;
+
+        pthread_mutex_unlock(&mLock);
+        return nodeToAdd->start;
+    }
+
+    Node* walker = head;
+    while (walker->next != NULL) {
+        if (walker->next->start - walker->end >= size) {
+            nodeToAdd->start = walker->end;
+            nodeToAdd->end = walker->end + size;
+            nodeToAdd->next = walker->next;
+            walker->next = nodeToAdd;
+
+            pthread_mutex_unlock(&mLock);
+            return nodeToAdd->start;
+        }
+        walker = walker->next;
+    }
+
+    if (memoryPool + memorySize - walker->end >= size) {
+        nodeToAdd->start = walker->end;
+        nodeToAdd->end = walker->end + size;
+        nodeToAdd->next = NULL;
+        walker->next = nodeToAdd;
+
+        pthread_mutex_unlock(&mLock);
+        return nodeToAdd->start;
+    }
+
+    free(nodeToAdd);
+
+    pthread_mutex_unlock(&mLock);
     return NULL;
 }
 
@@ -78,16 +124,31 @@ void* mem_alloc(size_t size) {
  * @param block A pointer to the memory block to free.
  */
 void mem_free(void* block) {
-    if (!block) return;
-
-    size_t index = block - memoryPool;
-    if (index >= memorySize || get_bit(start, index) != 1) {
+    pthread_mutex_lock(&mLock);
+    if (!block || !head) {
+        pthread_mutex_unlock(&mLock);
         return;
     }
 
-    clear_bit(start, index);
-    while (get_bit(end, index) == 0) index++;
-    clear_bit(end, index);
+    Node* curr = head;
+    Node* prev = NULL;
+
+    while (curr != NULL) {
+        if (curr->start == block) {
+            if (prev == NULL) {
+                head = curr->next;
+            } else {
+                prev->next = curr->next;
+            }
+            free(curr);
+
+            pthread_mutex_unlock(&mLock);
+            return;
+        }
+        prev = curr;
+        curr = curr->next;
+    }
+    pthread_mutex_unlock(&mLock);
 }
 
 /**
@@ -99,35 +160,58 @@ void mem_free(void* block) {
  * fails.
  */
 void* mem_resize(void* block, size_t size) {
+    if (!block) {
+        return mem_alloc(size);
+    }
+
     if (size == 0) {
         mem_free(block);
         return NULL;
     }
-    if (!block) return mem_alloc(size);
 
-    size_t startIndex = block - memoryPool;
-    if (startIndex >= memorySize || !get_bit(start, startIndex)) return NULL;
+    pthread_mutex_lock(&mLock);
 
-    size_t endIndex = startIndex;
-    while (!get_bit(end, endIndex)) endIndex++;
-    mem_free(block);
-    void* resizedBlock = mem_alloc(size);
+    Node* walker = head;
+    Node* prev = NULL;
 
-    if (!resizedBlock) {
-        set_bit(start, startIndex);
-        set_bit(end, endIndex);
+    while (walker != NULL && walker->start != block) {
+        prev = walker;
+        walker = walker->next;
+    }
+
+    if (walker == NULL) {
+        // Block not found
+        pthread_mutex_unlock(&mLock);
         return NULL;
     }
 
-    if (resizedBlock == block)
-        return block;
+    size_t oldSize = walker->end - walker->start;
 
-    else {
-        size_t sizeToReplace = (endIndex - startIndex + 1);
-        size_t minSize = (size < sizeToReplace) ? size : sizeToReplace;
+    // Remove the old block from the list
+    if (prev == NULL) {
+        head = walker->next;
+    } else {
+        prev->next = walker->next;
+    }
 
-        memcpy(resizedBlock, block, minSize);
-        return resizedBlock;
+    // Allocate a new block with the new size
+    void* newBlock = mem_alloc_no_lock(size);
+    if (newBlock) {
+        memcpy(newBlock, block, (size < oldSize) ? size : oldSize);
+        free(walker);
+
+        pthread_mutex_unlock(&mLock);
+        return newBlock;
+    } else {
+        // Allocation failed, restore the old block
+        if (prev == NULL) {
+            head = walker;
+        } else {
+            prev->next = walker;
+        }
+
+        pthread_mutex_unlock(&mLock);
+        return NULL;
     }
 }
 
@@ -136,8 +220,15 @@ void* mem_resize(void* block, size_t size) {
  * resetting the memory manager state.
  */
 void mem_deinit() {
-    free(start);
-    free(end);
+    Node* curr = head;
+    while (curr != NULL) {
+        Node* next = curr->next;
+        free(curr);
+        curr = next;
+    }
     free(memoryPool);
+    memoryPool = NULL;
     memorySize = 0;
+    head = NULL;
+    pthread_mutex_destroy(&mLock);
 }
